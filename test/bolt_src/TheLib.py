@@ -5,14 +5,15 @@ from __future__ import annotations
 import copy
 import glob
 import os
+from datetime import datetime
 from sys import exit as x
 from typing import List, Union
 
 import albumentations as A
 import cv2
 import matplotlib.pyplot as plt
-import numpy as np  # linear algebra
-import pandas as pd  # data processing, CSV file I/O (e.g. pd.read_csv)
+import numpy as np
+import pandas as pd
 import printj
 import pyjeasy.file_utils as f
 import torch
@@ -24,9 +25,11 @@ from imgaug import augmenters as iaa
 from PIL import Image
 # from RandAugment import RandAugment
 from torch.utils.data import ConcatDataset, DataLoader, Dataset
+from torch.utils.tensorboard import SummaryWriter
 from torchvision import transforms
 from torchvision.transforms.transforms import RandomGrayscale
 
+# writer = SummaryWriter()
 # get_ipython().run_line_magic('matplotlib', 'inline')
 
 
@@ -42,21 +45,25 @@ def check_cuda():
 
 
 class BoltDataset(Dataset):
-    def __init__(self, file_list, dir, mode='train', aug=None, transform=None, test_label: int = 1):
+    def __init__(self, file_list, dir, mode='train', aug=None, 
+                 transform=None, test_label: int = 1, 
+                 b_type_list: List[str] = ['b10', 'b11'],):
+        # super().__init__()
         self.file_list = file_list
         self.dir = dir
         self.mode = mode
         # self.transform = transform
         self.test_label = test_label
+        self.b_type_list = b_type_list
         if self.mode == 'train' or self.mode == 'val':
             # print(self.file_list)
             # if 'b00' in self.file_list[0]:
-            if 'b10' in self.file_list[0]:
+            if b_type_list[0] in self.file_list[0]:
                 self.label = 0
             else:
                 self.label = 1
         if aug is None:
-            self.aug = BoltClassifier.get_augmentation()
+            self.aug = BoltClassifier().get_augmentation()
 
     def __len__(self):
         return len(self.file_list)
@@ -75,7 +82,7 @@ class BoltDataset(Dataset):
 
 
 class BoltClassifier:
-    def __init__(self, device: str = 'cuda', img_size: int = 128, batch_size: int = 8, data_types: List[str] = ["train", "val", "test"],
+    def __init__(self, device: str = 'cuda', img_size: int = 256, batch_size: int = 8, data_types: List[str] = ["train", "val", "test"],
                 dataset_path: str = "/home/jitesh/3d/data/UE_training_results/bolt3/bolt_cropped",
                 b_type_list: List[str] = ['b10', 'b11'], num_workers: int = 2):
         self.device = device
@@ -85,7 +92,10 @@ class BoltClassifier:
         self.dataset_path = dataset_path
         self.b_type_list = b_type_list
         self.num_workers = num_workers
-        self.set_model()
+        self.scheduler = None
+        self.model = None
+        # self.set_model()
+        # self.dataloader = self.get_dataloader()
 
     def get_val(self, model, model_path, test_dir_path, no_of_samples: int = 24, test_label: int = 1, save_csv_path: str = None):
         model.load_state_dict(torch.load(model_path))
@@ -124,6 +134,71 @@ class BoltClassifier:
         samples = samples.to(self.device)
         val_sample = samples[:no_of_samples]
         return val_sample
+
+    def predict(self, model=None, model_path=None, test_dir_path=None, 
+                no_of_samples: int = 24, test_label: int = 1, 
+                save_csv_path: str = None):
+        if model is None:
+            model = self.model
+        model.load_state_dict(torch.load(model_path))
+        # "/home/jitesh/prj/classification/test/bolt/ckpt_densenet121_mark_correct_128_s3_5.pth"))
+        data_transform = transforms.Compose([
+            transforms.Resize((self.img_size, self.img_size)),
+            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+            transforms.ToTensor(),
+            ]) 
+        test_list = [file for file in os.listdir(test_dir_path) if os.path.isfile(
+            os.path.join(test_dir_path, file))] # and "b1" in file]
+        test_list = sorted(test_list)
+        # print(test_list)
+        test_data = BoltDataset(test_list, test_dir_path, mode="test",
+                                transform=data_transform, test_label=test_label)
+        testloader = DataLoader(
+            test_data, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+
+        model.eval()
+        fn_list = []
+        pred_list = []
+        for x, fn in testloader:
+            with torch.no_grad():
+                x = x.to(self.device)
+                output = model(x)
+                pred = torch.argmax(output, dim=1)
+                fn_list += [n[:-4] for n in fn]
+                pred_list += [p.item() for p in pred]
+
+        submission = pd.DataFrame({"id": fn_list, "label": pred_list})
+        if save_csv_path is None:
+            save_csv_path = f'preds_densenet121_dir_{self.img_size}_test_.csv'
+        elif '.csv' not in save_csv_path:
+            save_csv_path = save_csv_path + '/1.csv'
+        submission.to_csv(save_csv_path,
+                          #   index=False
+                          )
+        # samples, _ = iter(testloader).next()
+        # samples = samples.to(self.device)
+        # val_sample = samples[:no_of_samples]
+        # return val_sample
+
+    @staticmethod
+    def convert_img_shape_aug_to_normal(img):
+        # unnormalize
+        npimg = (img / 2 + 0.5)*255
+        # npimg = np.clip(npimg, 0, 255)
+        # print((npimg))
+        # print((npimg.shape))
+        # x()
+        # npimg = npimg.astype(int)
+        return Image.fromarray(npimg.astype('uint8'), 'RGB')
+
+    @staticmethod
+    def convert_img_shape_tensor_to_normal(img):
+        # unnormalize
+        img = img / 2 + 0.5
+        npimg = img.numpy()
+        npimg = np.clip(npimg, 0., 1.)
+        
+        return np.transpose(npimg, (1, 2, 0))
 
     @staticmethod
     def show_img(img):
@@ -165,19 +240,20 @@ class BoltClassifier:
         for data_type in self.data_types:
             dirname_new = os.path.join(self.dataset_path, data_type)
             filename_list[data_type] = os.listdir(dirname_new)
+        self.filename_list = filename_list
         return filename_list
 
-    def get_augmentation(self, save_path, load_path):
+    # aug_iaa = iaa.Sequential([
+    #                 iaa.flip.Fliplr(p=0.5),
+    #                 iaa.flip.Flipud(p=0.5),
+    #                 iaa.GaussianBlur(sigma=(0.0, 0.1)),
+    #                 iaa.MultiplyBrightness(mul=(0.65, 1.35)),
+    #             ])
+    
+    def get_augmentation(self, save_path=None, load_path=None):
         if load_path:
             return A.load(load_path)
         else:
-            # aug_iaa = iaa.Sequential([
-            #                 iaa.flip.Fliplr(p=0.5),
-            #                 iaa.flip.Flipud(p=0.5),
-            #                 iaa.GaussianBlur(sigma=(0.0, 0.1)),
-            #                 iaa.MultiplyBrightness(mul=(0.65, 1.35)),
-            #             ])
-
             aug_seq1 = A.OneOf([
                 A.Rotate(limit=(-90, 90), p=1.0),
                 A.Flip(p=1.0),
@@ -201,8 +277,9 @@ class BoltClassifier:
                            mode='pil', by_channels=True),
                 A.InvertImg(always_apply=False, p=1.0),
                 A.MotionBlur(always_apply=False, p=1.0, blur_limit=(3, 7)),
-                A.OpticalDistortion(always_apply=False, p=1.0, distort_limit=(-0.3, 0.3), shift_limit=(-0.05,
-                                                                                                       0.05), interpolation=0, border_mode=0, value=(0, 0, 0), mask_value=None),
+                A.OpticalDistortion(always_apply=False, p=1.0, distort_limit=(-0.3, 0.3), 
+                                    shift_limit=(-0.05, 0.05), interpolation=0, 
+                                    border_mode=0, value=(0, 0, 0), mask_value=None),
                 A.RandomFog(always_apply=False, p=1.0, fog_coef_lower=0.1,
                             fog_coef_upper=0.45, alpha_coef=0.5)
             ], p=1.0)
@@ -212,7 +289,8 @@ class BoltClassifier:
                 aug_seq2,
                 aug_seq3,
                 aug_seq4,
-                A.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5)),
+                # A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+                A.Normalize(mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5]),
             ])
             # aug_path = '/home/jitesh/prj/classification/test/bolt/aug/aug_seq.json'
             if save_path:
@@ -238,8 +316,8 @@ class BoltClassifier:
             dir_path = os.path.join(self.dataset_path, data_type)
             catagory_data = dict()
             # for b_type in ['b00', 'b01']: #  b_type_list:
-            for b_type in ['b10', 'b11']:  # b_type_list:
-                # for b_type in b_type_list:
+            # for b_type in ['b10', 'b11']:  # b_type_list:
+            for b_type in self.b_type_list:
                 # print(filename_list[data_type])
                 cat_files = [
                     tf for tf in self.filename_list[data_type] if b_type in tf]
@@ -247,7 +325,7 @@ class BoltClassifier:
                 # print(cat_files)
                 # , transform = albu_transforms)#data_transform)
                 catagory_data[b_type] = BoltDataset(
-                    cat_files, dir_path, mode=data_type)
+                    cat_files, dir_path, mode=data_type, b_type_list=self.b_type_list)
             dataset[data_type] = ConcatDataset(
                 [c for c in catagory_data.values()])
             print(f'len({data_type}_data): {len(dataset[data_type])}')
@@ -260,24 +338,32 @@ class BoltClassifier:
         dataloader = DataLoader(
             data, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
         print("len dataloader", len(dataloader))
+        self.dataloader = dataloader
         return dataloader
 
-    def view_data2(self, show_n_images: int = 24):
-        data = iter(self.get_dataloader)
-        images, labels = data.next()
-        self.show_img(torchvision.utils.make_grid(images))
-        # show_n_images = 40
+    def view_data2(self, dataloader=None, show_n_images: int = 24):
+        if dataloader is None:
+            dataloader = self.get_dataloader()
+        # images, labels = dataloader.next()
+        # self.show_img(torchvision.utils.make_grid(images))
+        # # show_n_images = 40
 
-        samples, labels = iter(self.get_dataloader).next()
+        samples, labels = iter(dataloader).next()
         plt.figure(figsize=(16*2, 24))
         grid_imgs = torchvision.utils.make_grid(samples[:show_n_images])
         # np_grid_imgs = grid_imgs.numpy()
         # in tensor, image is (batch, width, height), so you have to transpose it to (width, height, batch) in numpy to show it.
         # plt.imshow(np.transpose(np_grid_imgs, (1,2,0)))
         self.show_img(grid_imgs)
-        plt.savefig("augr.png")
+        # plt.savefig("augr.png")
 
-    def set_model(self, show_n_images: int = 24):
+    def get_lr(self):
+        for param_group in self.optimizer.param_groups:
+            return param_group['lr']
+        
+    def set_model(self, learning_rate: float = 0.001, scheduler_on :bool=False, scheduler_steps: list=[500,1000,1500], dataloader=None):
+        if dataloader is None:
+            dataloader = self.get_dataloader()
         model = torchvision.models.densenet121(pretrained=True)
         num_ftrs = model.classifier.in_features
         model.classifier = torch.nn.Sequential(
@@ -285,20 +371,19 @@ class BoltClassifier:
             torch.nn.Linear(500, 2)
             # torch.nn.Linear(500, 1)
         )
-
+        
         self.model = model.to(self.device)
-        loss_criteria = nn.CrossEntropyLoss()
+        self.loss_criteria = nn.CrossEntropyLoss()
         # loss_criteria = nn.BCELoss()
-        learning_rate = 0.001
         self.optimizer = torch.optim.Adam(
             model.parameters(), lr=learning_rate, amsgrad=True)
-        # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[500,1000,1500], gamma=0.5)
-        # scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=[ 100*batch_size], gamma=0.5)
-        self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            self.optimizer, milestones=[200], gamma=0.5)
-        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(
-            self.optimizer, gamma=0.1)
-        # scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, len(dataloader), eta_min=learning_rate)
+        if scheduler_on:
+            self.scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=scheduler_steps, gamma=0.5)
+            # scheduler = torch.optim.lr_scheduler.MultiStepLR(self.optimizer, milestones=[ 100*self.batch_size], gamma=0.5)
+            # self.scheduler = torch.optim.lr_scheduler.MultiStepLR(
+            #     self.optimizer, milestones=[200], gamma=0.5)
+            # self.scheduler = torch.optim.lr_scheduler.ExponentialLR(self.optimizer, gamma=0.1)
+            # self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, len(dataloader), eta_min=learning_rate)
         # return model,
     # # In[33]:
     # val_sample = get_val(model=model,
@@ -307,7 +392,15 @@ class BoltClassifier:
     #                      )
     # # In[33]:
 
-    def train(self, epochs: int = 5, val_sample=None, ):
+    def train(self, epochs: int = 5, val_sample=None, dataloader=None, show_tensorboard=True, tensorboard_log_dir_path=None, show_pyplot=False, weight_dir_path="weights"):
+        
+        if show_tensorboard:
+            if tensorboard_log_dir_path:
+                writer = SummaryWriter(log_dir=tensorboard_log_dir_path)
+            else:
+                writer = SummaryWriter()
+        if dataloader is None:
+            dataloader = self.get_dataloader()
         # epochs = 3
         # epochs = 10
         itr = 1
@@ -321,7 +414,7 @@ class BoltClassifier:
         val_acc_list = []
         # print("len dataloader", len(dataloader))
         for epoch in range(epochs):
-            for samples, labels in self.dataloader:
+            for samples, labels in dataloader:
                 # print(labels)
                 # print(labels.shape)
                 samples, labels = samples.to(
@@ -332,13 +425,18 @@ class BoltClassifier:
                 loss.backward()
                 total_loss += loss.item()
                 ###
-                val_output = self.model(val_sample)
-                val_loss = self.loss_criteria(output, torch.ones(
-                    8, dtype=torch.long).to(self.device))
-                val_total_loss += val_loss.item()
+                
+                if val_sample:
+                    val_output = self.model(val_sample)
+                    val_loss = self.loss_criteria(output, torch.ones(
+                        8, dtype=torch.long).to(self.device))
+                    val_total_loss += val_loss.item()
+                else:
+                    val_output = output
                 ###
                 self.optimizer.step()
-                self.scheduler.step()
+                if self.scheduler:
+                    self.scheduler.step()
                 if itr % p_itr == 0:
                     pred = torch.argmax(output, dim=1)
                     correct = pred.eq(labels)
@@ -346,54 +444,76 @@ class BoltClassifier:
                     loss_list.append(total_loss/p_itr)
                     acc_list.append(acc)
                     ###
-                    val_pred = torch.argmax(val_output, dim=1)
-                    val_correct = pred.eq(torch.ones(
-                        8, dtype=torch.long).to(self.device))
-                    val_acc = torch.mean(val_correct.float())
-                    val_loss_list.append(val_total_loss/p_itr)
-                    val_acc_list.append(val_acc)
-                    ###
+                    val_acc = 0
+                    if val_sample:
+                        val_pred = torch.argmax(val_output, dim=1)
+                        val_correct = val_pred.eq(torch.ones(
+                            8, dtype=torch.long).to(self.device))
+                        val_acc = torch.mean(val_correct.float())
+                        val_loss_list.append(val_total_loss/p_itr)
+                        val_acc_list.append(val_acc)
+                    
 
-                    if itr % p_itr == 0:
-                        print('[Epoch {}/{}] Iteration {} -> Train Loss: {:.4f}, Accuracy: {:.3f}, Val Accuracy: {:.3f}'.format(
-                            epoch+1, epochs, itr, total_loss/p_itr, acc, val_acc))
+                        if itr % p_itr == 0:
+                            print('[Epoch {}/{}] Iteration {} -> Train Loss: {:.4f}, Accuracy: {:.3f}, Val Accuracy: {:.3f}'.format(
+                                epoch+1, epochs, itr, total_loss/p_itr, acc, val_acc))
+                    else:
+                        if itr % p_itr == 0:
+                            print('[Epoch {}/{}] Iteration {} -> Train Loss: {:.4f}, Accuracy: {:.3f}'.format(
+                                epoch+1, epochs, itr, total_loss/p_itr, acc))
                     # loss_list.append(total_loss/p_itr)
                     # acc_list.append(acc)
+                    if show_tensorboard:
+                        writer.add_scalar('Loss/train', total_loss/p_itr, itr)
+                        writer.add_scalar('Accuracy/train', acc, itr)
+                        writer.add_scalar('Learning Rate', self.get_lr(), itr)
+                        if val_sample:
+                            writer.add_scalar('Loss/test', val_total_loss/p_itr, itr)
+                            writer.add_scalar('Accuracy/test', val_acc, itr)
+            
                     total_loss = 0
                     val_total_loss = 0
 
                 itr += 1
-            plt.plot(loss_list, label='loss')
-            plt.plot(val_loss_list, label='val_loss')
-            plt.legend()
-            plt.title('training and val loss')
-            plt.show()
-            ###
-            plt.plot(acc_list, label='accuracy')
-            plt.plot(val_acc_list, label='val_accuracy')
-            plt.legend()
-            plt.title('training and val accuracy')
-            plt.show()
+                
+            if show_pyplot:
+                plt.plot(loss_list, label='loss')
+                if val_sample:
+                    plt.plot(val_loss_list, label='val_loss')
+                plt.legend()
+                plt.title('training and val loss')
+                plt.show()
+                ###
+                plt.plot(acc_list, label='accuracy')
+                if val_sample:
+                    plt.plot(val_acc_list, label='val_accuracy')
+                plt.legend()
+                plt.title('training and val accuracy')
+                plt.show()
+            ''' Saving multiple weights'''
             filename_pth = f'ckpt_densenet121_mark_correct_{self.img_size}_s3_{epoch}.pth'
-            torch.save(self.model.state_dict(), filename_pth)
+            torch.save(self.model.state_dict(), os.path.join(weight_dir_path, filename_pth))
+            print("Weight file saved: ", os.path.join(weight_dir_path, filename_pth))
         print("Total iterations: ", itr-1)
 
-        plt.plot(loss_list, label='loss')
-        plt.plot(acc_list, label='accuracy')
-        plt.legend()
-        plt.title('training loss and accuracy')
-        plt.show()
+        if show_pyplot:
+            plt.plot(loss_list, label='loss')
+            plt.plot(acc_list, label='accuracy')
+            plt.legend()
+            plt.title('training loss and accuracy')
+            plt.show()
 
-        plt.plot(val_acc_list, label='Test_accuracy')
-        plt.plot(acc_list, label='Train_accuracy')
-        plt.legend()
-        plt.title('training loss and accuracy')
-        plt.show()
+            if val_sample:
+                plt.plot(val_acc_list, label='Test_accuracy')
+            plt.plot(acc_list, label='Train_accuracy')
+            plt.legend()
+            plt.title('training loss and accuracy')
+            plt.show()
 
         # filename_pth = 'ckpt_densenet121_catdog.pth'
         # filename_pth = f'ckpt_densenet121_mark_exist_{self.img_size}.pth'
         filename_pth = f'ckpt_densenet121_mark_correct_{self.img_size}_s3.pth'
-        torch.save(self.model.state_dict(), filename_pth)
+        torch.save(self.model.state_dict(), os.path.join(weight_dir_path, filename_pth))
 
     def _get_something(self, data=None):
         test_transform = transforms.Compose([
@@ -425,7 +545,46 @@ class BoltClassifier:
                           #   index=False
                           )
 
-    def get_pred(self, data=None):
+    def get_pred(self, model, model_path, test_dir_path, no_of_samples: int = 24, test_label: int = 1, save_csv_path: str = None):
+        model.load_state_dict(torch.load(model_path))
+        # "/home/jitesh/prj/classification/test/bolt/ckpt_densenet121_mark_correct_128_s3_5.pth"))
+        data_transform = transforms.Compose([
+            transforms.Resize((self.img_size, self.img_size)),
+            transforms.ToTensor()
+        ])
+        test_list = [file for file in os.listdir(test_dir_path) if os.path.isfile(
+            os.path.join(test_dir_path, file)) and "b1" in file]
+        test_list = sorted(test_list)
+        # print(test_list)
+        test_data = BoltDataset(test_list, test_dir_path, mode="test",
+                                transform=data_transform, test_label=test_label)
+        testloader = DataLoader(
+            test_data, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
+
+        model.eval()
+        fn_list = []
+        pred_list = []
+        for x, fn in testloader:
+            with torch.no_grad():
+                x = x.to(self.device)
+                output = model(x)
+                pred = torch.argmax(output, dim=1)
+                fn_list += [n[:-4] for n in fn]
+                pred_list += [p.item() for p in pred]
+
+        submission = pd.DataFrame({"id": fn_list, "label": pred_list})
+        if save_csv_path is None:
+            save_csv_path = f'preds_densenet121_dir_{self.img_size}_test_.csv'
+        submission.to_csv(save_csv_path,
+                          #   index=False
+                          )
+        samples, _ = iter(testloader).next()
+        samples = samples.to(self.device)
+        val_sample = samples[:no_of_samples]
+        return val_sample
+    
+    
+    def _get_pred_(self, data=None):
         if data is None:
             dataset = self.get_dataset()
             data = dataset["train"]
@@ -454,3 +613,35 @@ class BoltClassifier:
             plt.imshow(np.transpose(sample, (1, 2, 0)))
         # ax = plt.gca()
         plt.savefig('inference_mark_direction.png')
+
+
+    def preview_aug(self, image_path, grid=[4, 4], save_path=None):
+        pillow_image = Image.open(image_path)
+        image = np.array(pillow_image)
+        images = []
+        new_im = Image.new('RGB', (grid[1]*self.img_size,grid[0]*self.img_size))
+        # bolt =BoltClassifier(img_size=img_size)
+        transform = self.get_augmentation() #load_path='/home/jitesh/prj/classification/test/bolt_src/aug/aug_seq.json')
+        
+        # rsize = self.img_size
+        # rsize = int(1000/max(grid[0], grid[1]))
+        # xp = int(1000/grid[1])
+        # yp = int(1000/grid[0])
+        for i in range(grid[0]):
+            for j in range(grid[1]):
+                transformed_image = transform(image=image)['image']
+                # transformed_image.thumbnail((xp,xp))
+                t_image = self.convert_img_shape_aug_to_normal(transformed_image)
+                # transformed_image.resize(xp,xp, Image.ANTIALIAS)
+                # print(transformed_image)
+                # new_im.paste(transformed_image, (i*xp,j*xp))
+                # t_image = t_image.resize((rsize,rsize), Image.ANTIALIAS)
+                # print(t_image)
+                new_im.paste(t_image, (i*self.img_size,j*self.img_size))
+                # new_im.paste(t_image)
+                # import sys
+                # sys.exit()
+        new_im.show()
+        if save_path:
+            new_im.save(save_path)
+

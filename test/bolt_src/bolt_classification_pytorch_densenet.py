@@ -45,7 +45,7 @@ batch_size = 8
 data_types = ["train", "val", "test"]
 
 dataset_path = "/home/jitesh/3d/data/UE_training_results/bolt"
-dataset_path = "/home/jitesh/3d/data/UE_training_results/bolt2/bolt_cropped"
+dataset_path = "/home/jitesh/3d/data/UE_training_results/bolt3/bolt_cropped"
 b_type_list = [dir for dir in os.listdir(dataset_path) if dir not in data_types]
 print(b_type_list)
 
@@ -415,7 +415,7 @@ plt.savefig('inference_mark_direction.png')
 #     return image.cuda()  #assumes that you're using GPU
 img_path = "/home/jitesh/3d/data/UE_training_results/bolt/b11/000001.png"
 img_path = "/home/jitesh/3d/data/UE_training_results/bolt/val/b10_000496.png"
-img_path = "/home/jitesh/3d/data/UE_training_results/bolt2/bolt_cropped/test/b01_000810.png"
+img_path = "/home/jitesh/3d/data/UE_training_results/bolt3/bolt_cropped/test/b01_000810.png"
 dir_path = os.path.abspath(f"{img_path}/..")
 test_files = [img_path.split('/')[-1]]
 # image = image_loader(img_path)

@@ -120,7 +120,7 @@ for data_type in data_types:
 
 class BoltDataset(Dataset):
     def __init__(self, file_list, dir, mode='train', transform = None, test_label: int=1):
-        self.file_list = file_list
+        self.file_list = file_listsuper().__init__(fname, lname)
         self.dir = dir
         self.mode= mode
         self.transform = transform
